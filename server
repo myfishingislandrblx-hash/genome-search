@@ -1,0 +1,135 @@
+/**
+ * Local proxy server for NCBI BLAST requests.
+ *
+ * NCBI blocks requests that don't originate from a browser (CORS + bot detection),
+ * so the frontend cannot call blast.ncbi.nlm.nih.gov directly. This server sits in
+ * the middle: the browser talks to localhost, this server forwards to NCBI with
+ * proper headers, and relays the response back.
+ *
+ * Usage:
+ *   npm install express node-fetch
+ *   node server.js
+ *
+ * Then open genome_search.html in your browser (or serve it via this server).
+ */
+
+const express = require('express');
+const fetch = require('node-fetch');
+const path = require('path');
+
+const app = express();
+const PORT = 3000;
+
+const NCBI_BASE = 'https://blast.ncbi.nlm.nih.gov/Blast.cgi';
+
+// Headers that make NCBI treat the request as a legitimate browser client.
+// NCBI's Acceptable Use Policy also requires an email/tool identifier.
+const NCBI_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (compatible; GenomeSearchApp/1.0)',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+};
+
+// Serve the HTML file at the root so it shares the same origin as the proxy.
+app.use(express.static(path.dirname(__filename)));
+
+// Allow all localhost origins during development.
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', 'http://localhost:3000');
+    next();
+});
+
+/**
+ * POST /blast/submit
+ * Body: { sequence: string }
+ * Submits a BLAST job and returns the assigned RID.
+ */
+app.post('/blast/submit', express.json(), async (req, res) => {
+    const { sequence } = req.body;
+
+    if (!sequence || !/^[ACGTNRYSWKMBDHV]+$/i.test(sequence)) {
+        return res.status(400).json({ error: 'Invalid or missing DNA sequence.' });
+    }
+
+    const params = new URLSearchParams({
+        CMD: 'Put',
+        PROGRAM: 'blastn',
+        DATABASE: 'nr',
+        QUERY: sequence,
+    });
+
+    try {
+        const response = await fetch(`${NCBI_BASE}?${params}`, { headers: NCBI_HEADERS });
+
+        if (!response.ok) {
+            return res.status(502).json({ error: `NCBI returned HTTP ${response.status}` });
+        }
+
+        const text = await response.text();
+        const ridMatch = text.match(/^\s*RID\s*=\s*([A-Z0-9]+)\s*$/m);
+
+        if (!ridMatch) {
+            return res.status(502).json({
+                error: 'Could not parse a Request ID from the NCBI response. NCBI may be temporarily unavailable.',
+            });
+        }
+
+        res.json({ rid: ridMatch[1] });
+
+    } catch (err) {
+        res.status(502).json({ error: `Failed to reach NCBI: ${err.message}` });
+    }
+});
+
+/**
+ * GET /blast/results?rid=<RID>
+ * Polls NCBI for the result of a previously submitted job.
+ * Returns { status: 'waiting' } while NCBI is still running,
+ * or { status: 'done', data: <parsed JSON> } when complete.
+ */
+app.get('/blast/results', async (req, res) => {
+    const { rid } = req.query;
+
+    if (!rid || !/^[A-Z0-9]+$/i.test(rid)) {
+        return res.status(400).json({ error: 'Invalid or missing RID.' });
+    }
+
+    const params = new URLSearchParams({
+        CMD: 'Get',
+        RID: rid,
+        FORMAT_TYPE: 'JSON2',
+    });
+
+    try {
+        const response = await fetch(`${NCBI_BASE}?${params}`, { headers: NCBI_HEADERS });
+
+        if (!response.ok) {
+            return res.status(502).json({ error: `NCBI returned HTTP ${response.status}` });
+        }
+
+        const text = await response.text();
+
+        if (text.includes('Status=WAITING') || text.includes('Status=READYING')) {
+            return res.json({ status: 'waiting' });
+        }
+
+        if (text.includes('Status=UNKNOWN')) {
+            return res.status(404).json({ error: `RID ${rid} is unknown or has expired.` });
+        }
+
+        const trimmed = text.trim();
+        if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+            return res.status(502).json({ error: 'Received an unexpected non-JSON response from NCBI.' });
+        }
+
+        res.json({ status: 'done', data: JSON.parse(trimmed) });
+
+    } catch (err) {
+        res.status(502).json({ error: `Failed to reach NCBI: ${err.message}` });
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`Proxy server running at http://localhost:${PORT}`);
+    console.log(`Open http://localhost:${PORT}/genome_search.html in your browser.`);
+});
