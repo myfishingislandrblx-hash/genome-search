@@ -1,97 +1,4 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Genome Search Platform</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            max-width: 800px;
-            margin: 40px auto;
-            padding: 0 20px;
-            color: #333;
-            line-height: 1.6;
-        }
-        h1 {
-            color: #2c3e50;
-            border-bottom: 2px solid #ecf0f1;
-            padding-bottom: 10px;
-        }
-        .search-container {
-            margin: 20px 0;
-            display: flex;
-            gap: 10px;
-        }
-        input[type="text"] {
-            flex: 1;
-            padding: 12px;
-            font-size: 16px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            font-family: monospace;
-        }
-        button {
-            padding: 12px 24px;
-            font-size: 16px;
-            background-color: #3498db;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: background-color 0.2s;
-        }
-        button:hover {
-            background-color: #2980b9;
-        }
-        button:disabled {
-            background-color: #bdc3c7;
-            cursor: not-allowed;
-        }
-        #status {
-            font-weight: bold;
-            margin: 15px 0;
-            color: #e67e22;
-        }
-        .status-success {
-            color: #27ae60 !important;
-        }
-        .status-error {
-            color: #c0392b !important;
-        }
-        h3 {
-            margin-top: 30px;
-            color: #34495e;
-        }
-        #results {
-            white-space: pre-wrap;
-            background: #f8f9fa;
-            padding: 15px;
-            border: 1px solid #eaeded;
-            border-radius: 4px;
-            font-family: monospace;
-            font-size: 14px;
-            max-height: 500px;
-            overflow-y: auto;
-        }
-    </style>
-</head>
-<body>
-
-    <h1>Genome Search Platform</h1>
-    <p>Search DNA sequences using the NCBI BLAST API directly from your browser.</p>
-
-    <div class="search-container">
-        <input type="text" id="sequenceInput" placeholder="Enter DNA sequence (e.g., ATCGATTG...)">
-        <button id="searchBtn">Search</button>
-    </div>
-
-    <div id="status">Ready to search.</div>
-
-    <h3>Results:</h3>
-    <div id="results">No search performed yet.</div>
-
-    <script>
+<script>
         document.getElementById('searchBtn').addEventListener('click', async () => {
             const sequenceInput = document.getElementById('sequenceInput');
             const searchBtn = document.getElementById('searchBtn');
@@ -105,14 +12,12 @@
                 return;
             }
 
-            // Disable UI inputs during search execution
             searchBtn.disabled = true;
             sequenceInput.disabled = true;
             statusDiv.className = '';
             statusDiv.innerHTML = 'Submitting sequence to NCBI BLAST...';
             resultsDiv.innerText = '';
 
-            // Construct payload for API submission
             const params = new URLSearchParams();
             params.append('CMD', 'Put');
             params.append('PROGRAM', 'blastn');
@@ -120,7 +25,6 @@
             params.append('QUERY', sequence);
 
             try {
-                // Step 1: Submit the sequence request to NCBI
                 const response = await fetch(`https://blast.ncbi.nlm.nih.gov/Blast.cgi?${params.toString()}`);
                 
                 if (!response.ok) {
@@ -128,19 +32,16 @@
                 }
                 
                 const textResponse = await response.text();
-                
-                // Fallback regex to grab RID from HTML format or comment headers
                 const ridMatch = textResponse.match(/ID\s*=\s*([A-Z0-9]+)/i) || textResponse.match(/QName\s*=\s*([A-Z0-9]+)/i);
                 
                 if (!ridMatch) {
                     console.error("Raw NCBI Response:", textResponse);
-                    throw new Error('Could not parse Request ID (RID) from NCBI. See browser console.');
+                    throw new Error('Could not parse Request ID (RID) from NCBI.');
                 }
                 
                 const rid = ridMatch[1];
-                statusDiv.innerText = `Search submitted! RID: ${rid}. Waiting for results...`;
+                statusDiv.innerText = `Search submitted successfully! RID: ${rid}. Waiting for NCBI queue...`;
 
-                // Step 2: Begin checking back periodically for alignment data
                 pollResults(rid);
 
             } catch (error) {
@@ -148,7 +49,6 @@
                 statusDiv.innerText = 'Error submitting request.';
                 resultsDiv.innerText = error.message;
                 
-                // Reset UI controls so user can try again
                 searchBtn.disabled = false;
                 sequenceInput.disabled = false;
             }
@@ -160,38 +60,42 @@
             const statusDiv = document.getElementById('status');
             const resultsDiv = document.getElementById('results');
             
-            const checkUrl = `https://blast.ncbi.nlm.nih.gov/Blast.cgi?CMD=Get&RID=${rid}&FORMAT_TYPE=JSON`;
+            // Explicitly requesting standard modern JSON2 format mapping
+            const checkUrl = `https://blast.ncbi.nlm.nih.gov/Blast.cgi?CMD=Get&RID=${rid}&FORMAT_TYPE=JSON2`;
 
-            // Setup routine checking every 7 seconds
+            // Increased interval to 15 seconds to give the server breathing room to generate reports
             const checkInterval = setInterval(async () => {
                 try {
                     const response = await fetch(checkUrl);
                     const text = await response.text();
 
-                    // Check if NCBI says the calculation is still in progress
+                    // Case 1: Still waiting in the alignment processing queue
                     if (text.includes('Status=WAITING') || text.includes('READYING')) {
-                        statusDiv.innerText = `NCBI is processing alignment (RID: ${rid}). Please hold...`;
+                        statusDiv.innerText = `NCBI is still calculating sequence alignment (RID: ${rid})...`;
                         return;
                     }
 
-                    // Attempt to parse text payload as JSON results
+                    // Case 2: Alignment is done, but NCBI is wrapping/generating the JSON package
+                    if (text.includes('Status=UNKNOWN') || (!text.trim().startsWith('{') && !text.trim().startsWith('['))) {
+                        statusDiv.innerText = `Alignment complete! Waiting for NCBI to build and compress the JSON data structure...`;
+                        return;
+                    }
+
+                    // Case 3: Payload is a complete JSON document
                     const data = JSON.parse(text);
                     
                     statusDiv.className = 'status-success';
                     statusDiv.innerText = 'Search Complete!';
                     resultsDiv.innerText = JSON.stringify(data, null, 2);
                     
-                    // Clear loop and re-enable application controls
                     clearInterval(checkInterval);
                     searchBtn.disabled = false;
                     sequenceInput.disabled = false;
 
                 } catch (error) {
-                    // JSON parsing fails while NCBI returns preliminary HTML holding updates
-                    statusDiv.innerText = `Waiting for NCBI to package JSON report...`;
+                    // Safety catch to handle network hiccups without breaking the loop
+                    statusDiv.innerText = `Synchronizing stream with NCBI data pipeline...`;
                 }
-            }, 7000);
+            }, 15000); // 15-second delay between checks
         }
     </script>
-</body>
-</html>
