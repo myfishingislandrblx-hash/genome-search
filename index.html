@@ -1,13 +1,94 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
     <title>Genome Search</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #results { margin-top: 20px; white-space: pre-wrap; background: #f4f4f4; padding: 10px; border-radius: 5px; }
+        .loading { color: blue; }
+    </style>
 </head>
 <body>
-    <h1>Genome Search Platform</h1>
-    <p>Search DNA sequences using BLAST.</p>
 
-    <input type="text" placeholder="Enter DNA sequence">
-    <button>Search</button>
+    <h1>Genome Search Platform</h1>
+    <p>Search DNA sequences using NCBI BLAST API.</p>
+
+    <input type="text" id="sequenceInput" placeholder="Enter DNA sequence (e.g., ATCG...)">
+    <button id="searchBtn">Search</button>
+
+    <div id="status"></div>
+    <h3>Results:</h3>
+    <div id="results">No search performed yet.</div>
+
+    <script>
+        document.getElementById('searchBtn').addEventListener('click', async () => {
+            const sequence = document.getElementById('sequenceInput').value.trim();
+            const statusDiv = document.getElementById('status');
+            const resultsDiv = document.getElementById('results');
+
+            if (!sequence) {
+                alert('Please enter a DNA sequence.');
+                return;
+            }
+
+            statusDiv.innerHTML = '<span class="loading">Submitting sequence to NCBI BLAST...</span>';
+            resultsDiv.innerText = '';
+
+            try {
+                // Step 1: Submit the BLAST request
+                // Using 'blastn' for nucleotide-to-nucleotide search on the 'nr' database
+                const submitUrl = `https://blast.ncbi.nlm.nih.gov/Blast.cgi?CMD=Put&PROGRAM=blastn&DATABASE=nr&QUERY=${encodeURIComponent(sequence)}&FORMAT_TYPE=JSON`;
+                
+                const response = await fetch(submitUrl);
+                const textResponse = await response.text();
+                
+                // Extract Request ID (RID) using Regular Expressions from the HTML/Text response
+                const ridMatch = textResponse.match(/QName\s*=\s*([A-Z0-9]+)/);
+                
+                if (!ridMatch) {
+                    throw new Error('Could not retrieve Request ID from NCBI.');
+                }
+                
+                const rid = ridMatch[1];
+                statusDiv.innerText = `Search submitted. RID: ${rid}. Waiting for results...`;
+
+                // Step 2: Poll the API until results are ready
+                pollResults(rid);
+
+            } catch (error) {
+                statusDiv.innerText = 'Error submitting request.';
+                resultsDiv.innerText = error.message;
+            }
+        });
+
+        async function pollResults(rid) {
+            const statusDiv = document.getElementById('status');
+            const resultsDiv = document.getElementById('results');
+            const checkUrl = `https://blast.ncbi.nlm.nih.gov/Blast.cgi?CMD=Get&RID=${rid}&FORMAT_TYPE=JSON`;
+
+            // Wait 10 seconds before checking (BLAST takes time)
+            setTimeout(async function check() {
+                try {
+                    const response = await fetch(checkUrl);
+                    const data = await response.json();
+
+                    // Check if NCBI says the job is still running
+                    if (data.Status && data.Status === 'WAITING') {
+                        statusDiv.innerText = `Still searching (RID: ${rid})...`;
+                        setTimeout(check, 10000); // Check again in 10 seconds
+                    } else {
+                        statusDiv.innerText = 'Search Complete!';
+                        // Display the raw JSON or format it as needed
+                        resultsDiv.innerText = JSON.stringify(data, null, 2);
+                    }
+                } catch (error) {
+                    // Sometimes NCBI returns text/html status messages before JSON is ready
+                    statusDiv.innerText = `Processing alignment data...`;
+                    setTimeout(check, 5000);
+                }
+            }, 10000);
+        }
+    </script>
 </body>
 </html>
