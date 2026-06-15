@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Genome Search</title>
+</head>
+<body>
+    <h1>Genome Search Platform</h1>
+    <p>Search DNA sequences using BLAST.</p>
+
+    <input type="text" placeholder="Enter DNA sequence">
+    <button>Search</button>
+</body>
+</html>
