@@ -6,7 +6,7 @@
     <title>Genome Search Platform</title>
     <style>
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
             max-width: 800px;
             margin: 40px auto;
             padding: 0 20px;
@@ -82,7 +82,7 @@
     <p>Search DNA sequences using the NCBI BLAST API directly from your browser.</p>
 
     <div class="search-container">
-        <input type="text" id="sequenceInput" placeholder="Enter DNA sequence (e.g., ATCGATTG...)" value="ATCGATTG">
+        <input type="text" id="sequenceInput" placeholder="Enter DNA sequence (e.g., ATCGATTG...)" value="CCATTGCA">
         <button id="searchBtn">Search</button>
     </div>
 
@@ -105,41 +105,49 @@
                 return;
             }
 
+            // Lock UI elements while fetching data
             searchBtn.disabled = true;
             sequenceInput.disabled = true;
             statusDiv.className = '';
-            statusDiv.innerHTML = 'Submitting sequence to NCBI BLAST...';
+            statusDiv.innerHTML = 'Connecting to NCBI BLAST via proxy bridge...';
             resultsDiv.innerText = '';
 
+            // Constructing parameters for the submission query
             const params = new URLSearchParams();
             params.append('CMD', 'Put');
             params.append('PROGRAM', 'blastn');
             params.append('DATABASE', 'nr');
             params.append('QUERY', sequence);
 
+            // Utilizing a public CORS proxy to circumvent browser security restrictions
+            const proxy = "https://corsproxy.io/?";
+            const targetUrl = `https://blast.ncbi.nlm.nih.gov/Blast.cgi?${params.toString()}`;
+
             try {
-                const response = await fetch(`https://blast.ncbi.nlm.nih.gov/Blast.cgi?${params.toString()}`);
+                const response = await fetch(proxy + encodeURIComponent(targetUrl));
                 
                 if (!response.ok) {
-                    throw new Error(`NCBI server rejected request with status: ${response.status}`);
+                    throw new Error(`Proxy connection error: ${response.status}`);
                 }
                 
                 const textResponse = await response.text();
+                
+                // Track down the Request ID (RID) assigned by NCBI
                 const ridMatch = textResponse.match(/ID\s*=\s*([A-Z0-9]+)/i) || textResponse.match(/QName\s*=\s*([A-Z0-9]+)/i);
                 
                 if (!ridMatch) {
-                    console.error("Raw NCBI Response:", textResponse);
-                    throw new Error('Could not parse Request ID (RID) from NCBI.');
+                    throw new Error('NCBI busy or invalid sequence format. Could not parse RID.');
                 }
                 
                 const rid = ridMatch[1];
-                statusDiv.innerText = `Search submitted successfully! RID: ${rid}. Waiting for NCBI queue...`;
+                statusDiv.innerText = `Job submitted successfully! RID: ${rid}. Querying alignment queue...`;
 
+                // Fire up the tracking loop
                 pollResults(rid);
 
             } catch (error) {
                 statusDiv.className = 'status-error';
-                statusDiv.innerText = 'Error submitting request.';
+                statusDiv.innerText = 'Submission failed.';
                 resultsDiv.innerText = error.message;
                 
                 searchBtn.disabled = false;
@@ -153,23 +161,28 @@
             const statusDiv = document.getElementById('status');
             const resultsDiv = document.getElementById('results');
             
+            const proxy = "https://corsproxy.io/?";
             const checkUrl = `https://blast.ncbi.nlm.nih.gov/Blast.cgi?CMD=Get&RID=${rid}&FORMAT_TYPE=JSON2`;
 
+            // Poll the database every 12 seconds to monitor progress
             const checkInterval = setInterval(async () => {
                 try {
-                    const response = await fetch(checkUrl);
+                    const response = await fetch(proxy + encodeURIComponent(checkUrl));
                     const text = await response.text();
 
+                    // If NCBI is still running the computation
                     if (text.includes('Status=WAITING') || text.includes('READYING')) {
-                        statusDiv.innerText = `NCBI is still calculating sequence alignment (RID: ${rid})...`;
+                        statusDiv.innerText = `NCBI is calculating alignments (RID: ${rid})...`;
                         return;
                     }
 
+                    // If the alignment is done, but the database cluster is assembling the JSON packet
                     if (text.includes('Status=UNKNOWN') || (!text.trim().startsWith('{') && !text.trim().startsWith('['))) {
-                        statusDiv.innerText = `Alignment complete! Waiting for NCBI to build and compress the JSON data structure...`;
+                        statusDiv.innerText = `Alignment complete! Fetching and formatting data matrix...`;
                         return;
                     }
 
+                    // Parse the completed payload
                     const data = JSON.parse(text);
                     
                     statusDiv.className = 'status-success';
@@ -181,9 +194,9 @@
                     sequenceInput.disabled = false;
 
                 } catch (error) {
-                    statusDiv.innerText = `Synchronizing stream with NCBI data pipeline...`;
+                    statusDiv.innerText = `Waiting for data packet stream initialization...`;
                 }
-            }, 15000);
+            }, 12000);
         }
     </script>
 </body>
