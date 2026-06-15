@@ -92,111 +92,118 @@
     <div id="results">No search performed yet.</div>
 
     <script>
+        // NCBI BLAST recommends polling no faster than every 10 seconds.
+        const POLL_INTERVAL_MS = 12000;
+        // Give up after 10 minutes to avoid polling indefinitely.
+        const MAX_POLL_ATTEMPTS = 50;
+        // All NCBI requests go through the local proxy (server.js).
+        // NCBI blocks direct browser requests and all public CORS proxies.
+        const PROXY_SUBMIT = '/blast/submit';
+        const PROXY_RESULTS = '/blast/results';
+
+        function setStatus(message, className = '') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.className = className;
+        }
+
+        function setResults(text) {
+            document.getElementById('results').textContent = text;
+        }
+
+        function resetUI() {
+            document.getElementById('searchBtn').disabled = false;
+            document.getElementById('sequenceInput').disabled = false;
+        }
+
         document.getElementById('searchBtn').addEventListener('click', async () => {
             const sequenceInput = document.getElementById('sequenceInput');
             const searchBtn = document.getElementById('searchBtn');
-            const statusDiv = document.getElementById('status');
-            const resultsDiv = document.getElementById('results');
-            
-            const sequence = sequenceInput.value.trim();
+
+            const sequence = sequenceInput.value.replace(/\s+/g, '').toUpperCase();
 
             if (!sequence) {
                 alert('Please enter a DNA sequence.');
                 return;
             }
 
-            // Lock UI elements while fetching data
+            // Validate that the input contains only standard DNA/IUPAC nucleotide characters.
+            if (!/^[ACGTNRYSWKMBDHV]+$/.test(sequence)) {
+                alert('Invalid sequence. Please enter only DNA nucleotide characters (A, C, G, T, N, etc.).');
+                return;
+            }
+
+            // Disable UI while a search is in progress.
             searchBtn.disabled = true;
             sequenceInput.disabled = true;
-            statusDiv.className = '';
-            statusDiv.innerHTML = 'Connecting to NCBI BLAST via proxy bridge...';
-            resultsDiv.innerText = '';
-
-            // Constructing parameters for the submission query
-            const params = new URLSearchParams();
-            params.append('CMD', 'Put');
-            params.append('PROGRAM', 'blastn');
-            params.append('DATABASE', 'nr');
-            params.append('QUERY', sequence);
-
-            // Utilizing a public CORS proxy to circumvent browser security restrictions
-            const proxy = "https://corsproxy.io/?";
-            const targetUrl = `https://blast.ncbi.nlm.nih.gov/Blast.cgi?${params.toString()}`;
+            setStatus('Submitting sequence to NCBI BLAST...');
+            setResults('');
 
             try {
-                const response = await fetch(proxy + encodeURIComponent(targetUrl));
-                
-                if (!response.ok) {
-                    throw new Error(`Proxy connection error: ${response.status}`);
-                }
-                
-                const textResponse = await response.text();
-                
-                // Track down the Request ID (RID) assigned by NCBI
-                const ridMatch = textResponse.match(/ID\s*=\s*([A-Z0-9]+)/i) || textResponse.match(/QName\s*=\s*([A-Z0-9]+)/i);
-                
-                if (!ridMatch) {
-                    throw new Error('NCBI busy or invalid sequence format. Could not parse RID.');
-                }
-                
-                const rid = ridMatch[1];
-                statusDiv.innerText = `Job submitted successfully! RID: ${rid}. Querying alignment queue...`;
+                const response = await fetch(PROXY_SUBMIT, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sequence }),
+                });
 
-                // Fire up the tracking loop
+                const result = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(result.error || `Submission failed with HTTP ${response.status}`);
+                }
+
+                const rid = result.rid;
+                setStatus(`Job submitted. Request ID: ${rid}. Waiting for results...`);
+
                 pollResults(rid);
 
             } catch (error) {
-                statusDiv.className = 'status-error';
-                statusDiv.innerText = 'Submission failed.';
-                resultsDiv.innerText = error.message;
-                
-                searchBtn.disabled = false;
-                sequenceInput.disabled = false;
+                setStatus('Submission failed.', 'status-error');
+                setResults(error.message);
+                resetUI();
             }
         });
 
         async function pollResults(rid) {
-            const sequenceInput = document.getElementById('sequenceInput');
-            const searchBtn = document.getElementById('searchBtn');
-            const statusDiv = document.getElementById('status');
-            const resultsDiv = document.getElementById('results');
-            
-            const proxy = "https://corsproxy.io/?";
-            const checkUrl = `https://blast.ncbi.nlm.nih.gov/Blast.cgi?CMD=Get&RID=${rid}&FORMAT_TYPE=JSON2`;
+            let attempts = 0;
 
-            // Poll the database every 12 seconds to monitor progress
             const checkInterval = setInterval(async () => {
-                try {
-                    const response = await fetch(proxy + encodeURIComponent(checkUrl));
-                    const text = await response.text();
+                attempts++;
 
-                    // If NCBI is still running the computation
-                    if (text.includes('Status=WAITING') || text.includes('READYING')) {
-                        statusDiv.innerText = `NCBI is calculating alignments (RID: ${rid})...`;
-                        return;
-                    }
-
-                    // If the alignment is done, but the database cluster is assembling the JSON packet
-                    if (text.includes('Status=UNKNOWN') || (!text.trim().startsWith('{') && !text.trim().startsWith('['))) {
-                        statusDiv.innerText = `Alignment complete! Fetching and formatting data matrix...`;
-                        return;
-                    }
-
-                    // Parse the completed payload
-                    const data = JSON.parse(text);
-                    
-                    statusDiv.className = 'status-success';
-                    statusDiv.innerText = 'Search Complete!';
-                    resultsDiv.innerText = JSON.stringify(data, null, 2);
-                    
+                // Stop polling after the maximum number of attempts.
+                if (attempts > MAX_POLL_ATTEMPTS) {
                     clearInterval(checkInterval);
-                    searchBtn.disabled = false;
-                    sequenceInput.disabled = false;
+                    setStatus('Search timed out. NCBI may be under heavy load. Try again later.', 'status-error');
+                    setResults(`Your Request ID is: ${rid}\nYou can resume later at:\nhttps://blast.ncbi.nlm.nih.gov/Blast.cgi?CMD=Get&RID=${rid}`);
+                    resetUI();
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`${PROXY_RESULTS}?rid=${encodeURIComponent(rid)}`);
+                    const result = await response.json();
+
+                    if (!response.ok) {
+                        throw new Error(result.error || `HTTP ${response.status} while polling for results`);
+                    }
+
+                    if (result.status === 'waiting') {
+                        setStatus(`Waiting for NCBI to finish the search (RID: ${rid})... attempt ${attempts}/${MAX_POLL_ATTEMPTS}`);
+                        return;
+                    }
+
+                    clearInterval(checkInterval);
+                    setStatus('Search complete!', 'status-success');
+                    setResults(JSON.stringify(result.data, null, 2));
+                    resetUI();
 
                 } catch (error) {
-                    statusDiv.innerText = `Waiting for data packet stream initialization...`;
+                    clearInterval(checkInterval);
+                    setStatus('An error occurred while retrieving results.', 'status-error');
+                    setResults(error.message);
+                    resetUI();
                 }
-            }, 12000);
+            }, POLL_INTERVAL_MS);
         }
     </script>
 </body>
